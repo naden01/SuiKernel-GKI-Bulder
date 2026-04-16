@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Kernel name
-KERNEL_NAME="NzE-Gaming-kernel-ultra-perf"
+KERNEL_NAME="NzE-Gaming-ultra-perf++"
 # Kernel Build variables
 USER="Nze"
 HOST="Nzeus"
