@@ -3,31 +3,19 @@ name: Build GKI
 on:
   workflow_call:
     inputs:
-      RUNNER_TYPE:
-        type: string
-        default: 'self-hosted'
       TODO:
         type: string
       KSU:
         type: string
-      BUILD_BOOTIMG:
+      KSU_SUSFS:
+        type: string
+      KSU_MANUAL_HOOK:
         type: string
       LAST_BUILD:
         type: string
-      STATUS:
-        type: string
-        default: 'BETA'
 
   workflow_dispatch:
     inputs:
-      RUNNER_TYPE:
-        description: Choose the runner type
-        default: "self-hosted"
-        type: choice
-        options:
-          - "self-hosted"
-          - "ubuntu-latest"
-
       TODO:
         description: To do
         default: ""
@@ -38,14 +26,37 @@ on:
 
       KSU:
         description: KernelSU variant
-        default: "Next"
+        default: ""
         type: choice
         options:
+          - "None"
           - "Next"
+          - "Suki"
+          - "Magic"
+
+      KSU_SUSFS:
+        description: Include SUSFS?
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+      KSU_MANUAL_HOOK:
+        description: Use KSU Manual Hooks?
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+env:
+  MAN_DISABLE: true
+  DEBIAN_FRONTEND: noninteractive
 
 jobs:
   build:
-    runs-on: ${{ inputs.RUNNER_TYPE }}
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout source
@@ -53,11 +64,24 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Determine Build Status
+        run: |
+          if [ "${{ toJson(github.event.inputs) }}" == "null" ]; then
+            echo "STATUS=RELEASE" >> $GITHUB_ENV
+            echo "TRIGGER=workflow_call" >> $GITHUB_ENV
+          else
+            echo "STATUS=BETA" >> $GITHUB_ENV
+            echo "TRIGGER=workflow_dispatch" >> $GITHUB_ENV
+          fi
+
       - name: Validate Inputs and Secrets
         env:
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }} # telegram chat id
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }} # telegram bot token
+          GH_TOKEN: ${{ secrets.GH_TOKEN }} # github token
+          KSU: ${{ inputs.KSU }}
+          KSU_SUSFS: ${{ inputs.KSU_SUSFS }}
+          KSU_MANUAL_HOOK: ${{ inputs.KSU_MANUAL_HOOK }}
         run: |
           _error() {
               echo "❌ ERROR: $*"
@@ -76,66 +100,60 @@ jobs:
             _error "Missing GH_TOKEN secret (GitHub PAT)"
           fi
 
+          # Check KernelSU variants
+          if [[ $KSU == "None" && $KSU_SUSFS == "true" ]]; then
+              _error "Cannot use SuSFS without KernelSU"
+          fi
+          if [[ $KSU == "None" && $KSU_MANUAL_HOOK == "true" ]]; then
+            _error "Cannot use KSU Manual Hooks without KernelSU!"
+          fi
+
           if [[ $ret -gt 0 ]]; then
             exit $ret
           fi
 
       - name: Install Dependencies
         run: |
-          export MAN_DISABLE=true
-          sudo rm -f /etc/apt/sources.list.d/yarn.list
-          sudo apt update -y
-          sudo apt install -y bc cpio flex bison aptitude gh git python3 \
-                              tar perl wget curl lz4 zstd libarchive-tools aria2
-          sudo aptitude install -y libssl-dev
-          pip install lxml
+          sudo apt-get update
+          sudo apt-get install -y gh bc bison flex libssl-dev libelf-dev dwarves cpio
+
+#     - name: Enable swap with high priority and swappiness
+#       run: |
+#         sudo swapoff -a
+#         sudo fallocate -l 12G /swapfile
+#         sudo chmod 600 /swapfile
+#         sudo mkswap /swapfile
+#         sudo swapon /swapfile --priority 100
+#         sudo sysctl vm.swappiness=100
+#         free -h
+#         echo
+#         swapon --show
 
       - name: Run Build Script
         env:
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }} # telegram chat id
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }} # telegram bot token
+          GH_TOKEN: ${{ secrets.GH_TOKEN }} # github token
           KSU: ${{ inputs.KSU }}
-          BUILD_BOOTIMG: ${{ inputs.BUILD_BOOTIMG }}
+          KSU_SUSFS: ${{ inputs.KSU_SUSFS }}
+          KSU_MANUAL_HOOK: ${{ inputs.KSU_MANUAL_HOOK }}
           LAST_BUILD: ${{ inputs.LAST_BUILD }}
           TODO: ${{ inputs.TODO }}
-          STATUS: ${{ inputs.STATUS }}
         run: |
           export GIT_CLONE_PROTECTION_ACTIVE=false
           chmod +x *.sh
           ./build.sh
 
-      - name: Upload Artifacts (ZIP Only)
-        id: upload-zip
+      - name: Upload Artifacts (ZIP & IMG)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BASE_NAME }}-${{ github.run_number }}
           path: |
             artifacts/*.zip
+            artifacts/*.img
 
       - name: Upload Artifacts (Info File)
         uses: actions/upload-artifact@v4
         with:
           name: info-${{ github.run_number }}
           path: artifacts/*.txt
-
-      - name: Send Artifact Link to Telegram
-        if: inputs.STATUS != 'BETA' && success()
-        env:
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          MESSAGE_ID: ${{ env.MESSAGE_ID }}
-          # Constructs the URL: Server URL + Repo + Run ID + Artifact ID
-          ARTIFACT_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts/${{ steps.upload-zip.outputs.artifact-id }}
-        run: |
-            MSG="✅ *Build Succeeded*
-
-            📥 [Download Artifact]($ARTIFACT_URL)"
-
-            # Send message replying to the original build start message
-            curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
-            -d chat_id="$TG_CHAT_ID" \
-            -d reply_to_message_id="$MESSAGE_ID" \
-            -d text="$MSG" \
-            -d parse_mode="Markdown" \
-            -d disable_web_page_preview=true
